@@ -1,0 +1,57 @@
+name: Multi Search and Replace v.3
+on:
+  workflow_dispatch:
+    inputs:
+      search_phrases:
+        description: 'Pipe-separated list of phrases to search for'
+        required: true
+      replace_phrases:
+        description: 'Pipe-separated list of phrases to replace with'
+        required: true
+      file_name_contains:
+        description: 'Phrase contained in the file name (optional)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  search_and_replace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - uses: actions/setup-python@v2
+        with:
+          python-version: '3.x'
+
+      - name: Search & Replace and Commit Changes
+        env:
+          SEARCH_PHRASES: ${{ github.event.inputs.search_phrases }}
+          REPLACE_PHRASES: ${{ github.event.inputs.replace_phrases }}
+          FILE_NAME_CONTAINS: ${{ github.event.inputs.file_name_contains }}
+        run: |
+          IFS='|' read -r -a SEARCH_ARRAY <<< "${SEARCH_PHRASES}"
+          IFS='|' read -r -a REPLACE_ARRAY <<< "${REPLACE_PHRASES}"
+
+          if [ "${#SEARCH_ARRAY[@]}" -ne "${#REPLACE_ARRAY[@]}" ]; then
+            echo "Error: Mismatch in number of search & replace phrases."
+            exit 1
+          fi
+
+          for i in "${!SEARCH_ARRAY[@]}"; do
+            find . -name "*${FILE_NAME_CONTAINS}*.html" -type f \
+              -exec sed -i "s|$(printf '%s\n' "${SEARCH_ARRAY[$i]}" | sed 's:[\\/&]:\\&:g')|$(printf '%s\n' "${REPLACE_ARRAY[$i]}" | sed 's:[\\/&]:\\&:g')|g" {} +
+          done
+
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add .
+          git commit -m "Batch replace on $(date +'%Y-%m-%d')"
+
+      - name: Push changes
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          git push https://x-access-token:${GH_PAT}@github.com/${{ github.repository }} HEAD:main
