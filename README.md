@@ -1,4 +1,11 @@
 
+## Topical-authority planning
+
+- [`TOPICAL_AUTHORITY.md`](TOPICAL_AUTHORITY.md) defines Kolam.co.id's knowledge boundary, topic architecture, existing-site risks, and internal-link model.
+- [`ARTICLE_CATALOG.md`](ARTICLE_CATALOG.md) expands every broad topic into 198 unique article/tool intents with proposed slugs, scope boundaries, and related clusters.
+
+These files are planning inventories, not an instruction to publish everything automatically. Audit overlapping legacy URLs and run bounded evidence-producing clusters before scaling.
+
 ## Sitemap URLs
 Number of URLs: 730
   - [https://kolam.co.id/perawatan-kolam-renang-balikpapan](https://google.com/search?q=site%3Ahttps://kolam.co.id/perawatan-kolam-renang-balikpapan)
