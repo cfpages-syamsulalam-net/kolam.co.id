@@ -1,57 +1,134 @@
-name: Multi Search and Replace v.3
+name: Repository Text and Contact Route Update v1
+
 on:
   workflow_dispatch:
     inputs:
-      search_phrases:
-        description: 'Pipe-separated list of phrases to search for'
+      mode:
+        description: Transformation mode
         required: true
-      replace_phrases:
-        description: 'Pipe-separated list of phrases to replace with'
+        type: choice
+        options:
+          - contact-routes
+          - exact
+      spec_json:
+        description: Strict JSON specification for the selected mode
         required: true
-      file_name_contains:
-        description: 'Phrase contained in the file name (optional)'
+        type: string
+      expected_base_sha:
+        description: Exact branch SHA that was reviewed before dispatch
+        required: true
+        type: string
+      commit_message:
+        description: Commit message for an actual verified change
         required: false
-        default: ''
+        default: Apply reviewed repository transformation
+        type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: repository-transform-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  search_and_replace:
+  transform:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
     steps:
-      - uses: actions/checkout@v2
-
-      - uses: actions/setup-python@v2
-        with:
-          python-version: '3.x'
-
-      - name: Search & Replace and Commit Changes
+      - name: Verify dispatch binding
+        shell: bash
         env:
-          SEARCH_PHRASES: ${{ github.event.inputs.search_phrases }}
-          REPLACE_PHRASES: ${{ github.event.inputs.replace_phrases }}
-          FILE_NAME_CONTAINS: ${{ github.event.inputs.file_name_contains }}
+          EXPECTED_BASE_SHA: ${{ inputs.expected_base_sha }}
         run: |
-          IFS='|' read -r -a SEARCH_ARRAY <<< "${SEARCH_PHRASES}"
-          IFS='|' read -r -a REPLACE_ARRAY <<< "${REPLACE_PHRASES}"
-
-          if [ "${#SEARCH_ARRAY[@]}" -ne "${#REPLACE_ARRAY[@]}" ]; then
-            echo "Error: Mismatch in number of search & replace phrases."
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" != "branch" ]]; then
+            echo "The workflow must be dispatched against a branch." >&2
+            exit 1
+          fi
+          if [[ ! "$EXPECTED_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "expected_base_sha must be a lowercase 40-character Git SHA." >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_SHA" != "$EXPECTED_BASE_SHA" ]]; then
+            echo "The dispatched branch moved after review; refusing to transform stale bytes." >&2
             exit 1
           fi
 
-          for i in "${!SEARCH_ARRAY[@]}"; do
-            find . -name "*${FILE_NAME_CONTAINS}*.html" -type f \
-              -exec sed -i "s|$(printf '%s\n' "${SEARCH_ARRAY[$i]}" | sed 's:[\\/&]:\\&:g')|$(printf '%s\n' "${REPLACE_ARRAY[$i]}" | sed 's:[\\/&]:\\&:g')|g" {} +
-          done
+      - name: Check out the reviewed branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref_name }}
+          persist-credentials: true
 
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git add .
-          git commit -m "Batch replace on $(date +'%Y-%m-%d')"
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
 
-      - name: Push changes
+      - name: Run transformer regression tests
+        run: python .github/scripts/test_repository_transform.py
+
+      - name: Transform reviewed files
+        id: transform
         env:
-          GH_PAT: ${{ secrets.GH_PAT }}
+          TRANSFORM_MODE: ${{ inputs.mode }}
+          TRANSFORM_SPEC_JSON: ${{ inputs.spec_json }}
+          TRANSFORM_PATHS_FILE: ${{ runner.temp }}/repository-transform-paths.nul
+          TRANSFORM_SUMMARY_FILE: ${{ runner.temp }}/repository-transform-summary.json
         run: |
-          git push https://x-access-token:${GH_PAT}@github.com/${{ github.repository }} HEAD:main
+          python .github/scripts/repository_transform.py transform \
+            --root "$GITHUB_WORKSPACE" \
+            --mode "$TRANSFORM_MODE" \
+            --spec-json "$TRANSFORM_SPEC_JSON" \
+            --paths-file "$TRANSFORM_PATHS_FILE" \
+            --summary-file "$TRANSFORM_SUMMARY_FILE" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Verify exact unstaged boundary
+        if: steps.transform.outputs.changed == 'true'
+        env:
+          TRANSFORM_PATHS_FILE: ${{ runner.temp }}/repository-transform-paths.nul
+        run: |
+          python .github/scripts/repository_transform.py verify-git \
+            --root "$GITHUB_WORKSPACE" \
+            --paths-file "$TRANSFORM_PATHS_FILE" \
+            --state unstaged
+
+      - name: Stage only verified paths
+        if: steps.transform.outputs.changed == 'true'
+        env:
+          TRANSFORM_PATHS_FILE: ${{ runner.temp }}/repository-transform-paths.nul
+        run: |
+          git add --pathspec-from-file="$TRANSFORM_PATHS_FILE" --pathspec-file-nul
+          git diff --cached --check
+
+      - name: Verify exact staged boundary
+        if: steps.transform.outputs.changed == 'true'
+        env:
+          TRANSFORM_PATHS_FILE: ${{ runner.temp }}/repository-transform-paths.nul
+        run: |
+          python .github/scripts/repository_transform.py verify-git \
+            --root "$GITHUB_WORKSPACE" \
+            --paths-file "$TRANSFORM_PATHS_FILE" \
+            --state staged
+
+      - name: Commit and push verified changes
+        if: steps.transform.outputs.changed == 'true'
+        shell: bash
+        env:
+          COMMIT_MESSAGE: ${{ inputs.commit_message }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "$COMMIT_MESSAGE"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: Report idempotent no-op
+        if: steps.transform.outputs.changed != 'true'
+        run: echo "The reviewed postconditions already hold; no commit or push was created."
